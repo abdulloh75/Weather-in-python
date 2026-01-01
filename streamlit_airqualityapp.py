@@ -7,7 +7,7 @@ import altair as alt
 import requests
 import io
 
-# -----------------------------
+# --------------------------------
 # Helper funksiyalar
 # -----------------------------
 from functions import air_quality, get_weather, add_time_features
@@ -220,7 +220,15 @@ def compute_risk_alerts(forecast_df_prepared: pd.DataFrame, certainty_scores: pd
     return alerts
 
 @st.cache_data(ttl=3600)
-def fetch_satellite_png(lat: float, lon: float, date_utc: datetime, km_radius: float = 25.0):
+def fetch_satellite_png(
+    lat: float,
+    lon: float,
+    date_utc: datetime,
+    km_radius: float = 25.0,
+    layer: str = "MODIS_Terra_CorrectedReflectance_TrueColor",
+    width: int = 800,
+    height: int = 500,
+):
     if lat is None or lon is None or np.isnan(lat) or np.isnan(lon):
         return None, "Missing coordinates"
 
@@ -238,12 +246,12 @@ def fetch_satellite_png(lat: float, lon: float, date_utc: datetime, km_radius: f
         "service": "WMS",
         "request": "GetMap",
         "version": "1.3.0",
-        "layers": "MODIS_Terra_CorrectedReflectance_TrueColor",
+        "layers": layer,
         "styles": "",
         "format": "image/png",
         "transparent": "false",
-        "width": 800,
-        "height": 500,
+        "width": int(width),
+        "height": int(height),
         "crs": "EPSG:4326",
         "bbox": f"{min_lat},{min_lon},{max_lat},{max_lon}",
         "time": time_str,
@@ -254,6 +262,10 @@ def fetch_satellite_png(lat: float, lon: float, date_utc: datetime, km_radius: f
         resp = requests.get(url, params=params, timeout=20)
         if resp.status_code != 200 or not resp.content:
             return None, f"HTTP {resp.status_code}"
+        content_type = resp.headers.get("Content-Type", "")
+        if "image" not in content_type.lower():
+            preview = resp.text[:300] if hasattr(resp, "text") else ""
+            return None, f"Unexpected response type: {content_type}. {preview}"
         return io.BytesIO(resp.content), None
     except Exception as e:
         return None, str(e)
@@ -268,6 +280,30 @@ FEATURES = [
     'value_lag1','value_lag24','value_roll6','value_roll24'
 ]
 
+SATELLITE_LAYERS = {
+    "MODIS True Color (Terra)": {
+        "layer": "MODIS_Terra_CorrectedReflectance_TrueColor",
+        "caption": "NASA GIBS: MODIS True Color (approximate)",
+    },
+    "VIIRS True Color (SNPP)": {
+        "layer": "VIIRS_SNPP_CorrectedReflectance_TrueColor",
+        "caption": "NASA GIBS: VIIRS True Color (approximate)",
+    },
+    "AIRS CO Total Column (Day)": {
+        "layer": "AIRS_CO_Total_Column_Day",
+        "caption": "NASA GIBS: AIRS CO Total Column (Day)",
+    },
+}
+
+SATELLITE_LOCATIONS = {
+    "Tashkent": {"lat": 41.3111, "lon": 69.2797},
+    "Samarkand": {"lat": 39.6542, "lon": 66.9597},
+    "Bukhara": {"lat": 39.7681, "lon": 64.4556},
+    "Fergana": {"lat": 40.3894, "lon": 71.7864},
+    "Nukus": {"lat": 42.4600, "lon": 59.6166},
+    "Custom": {"lat": 41.3111, "lon": 69.2797},
+}
+
 # -----------------------------
 # Sidebar
 # -----------------------------
@@ -276,6 +312,31 @@ st.sidebar.text("Data: OpenAQ + OpenMeteo")
 st.sidebar.text("Refresh: every 30 minutes")
 st.sidebar.text("Forecast: 3 days")
 st.sidebar.text("Model: best_model.pkl")
+
+st.sidebar.subheader("Satellite imagery")
+show_satellite = st.sidebar.checkbox("Show satellite imagery", value=True)
+
+sat_layer_name = st.sidebar.selectbox(
+    "Layer",
+    options=list(SATELLITE_LAYERS.keys()),
+    index=0,
+)
+
+sat_location_name = st.sidebar.selectbox(
+    "Location",
+    options=list(SATELLITE_LOCATIONS.keys()),
+    index=0,
+)
+
+default_coords = SATELLITE_LOCATIONS.get(sat_location_name, SATELLITE_LOCATIONS["Tashkent"])
+sat_lat = float(default_coords["lat"])
+sat_lon = float(default_coords["lon"])
+if sat_location_name == "Custom":
+    sat_lat = float(st.sidebar.number_input("Latitude", value=sat_lat, format="%.6f"))
+    sat_lon = float(st.sidebar.number_input("Longitude", value=sat_lon, format="%.6f"))
+
+sat_date = st.sidebar.date_input("Date (UTC)", value=datetime.now(timezone.utc).date())
+sat_km_radius = float(st.sidebar.slider("Radius (km)", min_value=5, max_value=150, value=25, step=5))
 
 # -----------------------------
 # Title
@@ -333,13 +394,25 @@ with tab_dashboard:
     st.subheader("Satellite Imagery (Unified View)")
     sat_col1, sat_col2 = st.columns([2, 1])
     with sat_col1:
-        sat_img, sat_err = fetch_satellite_png(lat=41.3111, lon=69.2797, date_utc=datetime.now(timezone.utc))
-        if sat_img is not None:
-            st.image(sat_img, caption="NASA GIBS: MODIS True Color (approximate)", use_container_width=True)
+        if show_satellite:
+            sat_layer_cfg = SATELLITE_LAYERS.get(sat_layer_name, SATELLITE_LAYERS["MODIS True Color (Terra)"])
+            sat_dt_utc = datetime.combine(sat_date, datetime.min.time(), tzinfo=timezone.utc)
+            sat_img, sat_err = fetch_satellite_png(
+                lat=sat_lat,
+                lon=sat_lon,
+                date_utc=sat_dt_utc,
+                km_radius=sat_km_radius,
+                layer=sat_layer_cfg["layer"],
+            )
+            if sat_img is not None:
+                st.image(sat_img, caption=sat_layer_cfg["caption"], use_container_width=True)
+            else:
+                st.info(f"Satellite imagery unavailable: {sat_err}")
         else:
-            st.info(f"Satellite imagery unavailable: {sat_err}")
+            st.info("Satellite imagery is disabled in the sidebar.")
     with sat_col2:
-        st.write("Location: Tashkent (approx.)")
+        st.write(f"Location: {sat_location_name} (lat={sat_lat:.4f}, lon={sat_lon:.4f})")
+        st.write(f"Layer: {sat_layer_name}")
         st.write("If the satellite panel fails, the app will continue with forecast + model outputs.")
 
 # -----------------------------
