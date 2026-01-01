@@ -266,7 +266,7 @@ def fetch_satellite_png(
         if "image" not in content_type.lower():
             preview = resp.text[:300] if hasattr(resp, "text") else ""
             return None, f"Unexpected response type: {content_type}. {preview}"
-        return io.BytesIO(resp.content), None
+        return resp.content, None
     except Exception as e:
         return None, str(e)
 
